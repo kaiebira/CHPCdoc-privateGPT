@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-from langchain.chains import RetrievalQA
+from langchain.chains import ConversationalRetrievalChain
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 from langchain_community.vectorstores import Chroma
 from langchain_community.llms import Ollama
+from langchain.memory import ConversationBufferMemory
+from langchain.prompts import PromptTemplate
 import chromadb
 import os
 import argparse
-import time
+import sys
 
 model = os.environ.get("MODEL", "llama3")
-# For embeddings model, the example uses a sentence-transformers model
-# https://www.sbert.net/docs/pretrained_models.html 
-# "The all-mpnet-base-v2 model provides the best quality, while all-MiniLM-L6-v2 is 5 times faster and still offers good quality."
 embeddings_model_name = os.environ.get("EMBEDDINGS_MODEL_NAME", "all-mpnet-base-v2")
 persist_directory = os.environ.get("PERSIST_DIRECTORY", "db")
-target_source_chunks = int(os.environ.get('TARGET_SOURCE_CHUNKS',4))
+target_source_chunks = int(os.environ.get('TARGET_SOURCE_CHUNKS', 4))
+context_window = int(os.environ.get('CONTEXT_WINDOW', 4000))
 
 from constants import CHROMA_SETTINGS
 
@@ -32,30 +32,62 @@ def main():
 
     llm = Ollama(model=model, callbacks=callbacks)
 
-    qa = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=retriever, return_source_documents= not args.hide_source)
+    # Initialize conversation memory
+    memory = ConversationBufferMemory(
+        memory_key="chat_history",
+        return_messages=True,
+        output_key="answer",
+        k=5
+    )
+
+    # Custom prompt template
+    prompt_template = """
+    Human: {question} If you cannot answer the question based on the context, simply state "Unfortunately, I cannot answer your question at this time.", and politely refer the user to CHPC documentation at https://www.chpc.utah.edu/documentation. Make sure to specifically provide that link for the user. Do not refer to the context such as: "Based on...," "According to...," etc. Be detailed, clear, and concise. Do not format your answers as Markdown. Quote code blocks verbatim for the user.
+    
+    Assistant:
+
+    {context}
+
+    From CHPC documentation:
+
+    """
+
+    PROMPT = PromptTemplate(
+        template=prompt_template, input_variables=["context", "question"]
+    )
+
+    # Create the conversational chain
+    qa = ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        retriever=retriever,
+        memory=memory,
+        return_source_documents=False,
+        verbose=False,
+        combine_docs_chain_kwargs={"prompt": PROMPT}
+    )
+
     # Interactive questions and answers
-    while True:
-        query = input("\nEnter a query: ")
-        if query == "exit":
-            break
-        if query.strip() == "":
-            continue
+    try:
+        while True:
+            query = input("\nEnter a query (or 'exit()' to quit): ")
+            if query.lower() in ["exit()", "quit", "q"]:
+                print("\nCleaning up and exiting.")
+                break
+            if query.strip() == "":
+                continue
 
-        # Get the answer from the chain
-        start = time.time()
-        res = qa.invoke({"query": query})
-        answer, docs = res['result'], [] if args.hide_source else res['source_documents']
-        end = time.time()
+            # Get the answer from the chain using invoke
+            res = qa.invoke({"question": query})
+            answer = res['answer']
 
-        # Print the result
-        print("\n\n> Question:")
-        print(query)
-        print(answer)
-
-        # Print the relevant sources used for the answer
-        for document in docs:
-            print("\n> " + document.metadata["source"] + ":")
-            print(document.page_content)
+            print(answer)
+    except KeyboardInterrupt:
+        print("\n\nInterrupt received.")
+    except Exception as e:
+        print(f"\nAn error occurred: {e}")
+    finally:
+        print("\nCleaning up and exiting.")
+        # Add any cleanup code here if needed
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='privateGPT: Ask questions to your documents without an internet connection, '
@@ -68,7 +100,6 @@ def parse_arguments():
                         help='Use this flag to disable the streaming StdOut callback for LLMs.')
 
     return parser.parse_args()
-
 
 if __name__ == "__main__":
     main()
