@@ -2,3 +2,4 @@ langchain
 langchain_huggingface
 langchain_community
 chromadb
+unstructured
